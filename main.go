@@ -36,6 +36,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	volcanoclient "volcano.sh/volcano/pkg/client/clientset/versioned"
 
 	crclientset "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/client/clientset/versioned"
 	crinformers "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/client/informers/externalversions"
@@ -62,6 +63,7 @@ var (
 	metricsEndpoint   = flag.String("metrics-endpoint", "/metrics", "Metrics endpoint.")
 	metricsPrefix     = flag.String("metrics-prefix", "", "Prefix for the metrics.")
 	ingressUrlFormat  = flag.String("ingress-url-format", "", "Ingress URL format.")
+	enableVolcanoScheduling = flag.Bool("enable-volcano-scheduling", false, "Whether enable scheduling executor pods via volcano.")
 )
 
 func main() {
@@ -105,6 +107,15 @@ func main() {
 		glog.Fatal(err)
 	}
 
+	var volcanoClient volcanoclient.Interface
+	if *enableVolcanoScheduling {
+		var err error
+		volcanoClient, err = volcanoclient.NewForConfig(config)
+		if err != nil {
+			glog.Fatal(err)
+		}
+	}
+
 	if *installCRDs {
 		err = crd.CreateOrUpdateCRD(apiExtensionsClient, sacrd.GetCRD())
 		if err != nil {
@@ -120,7 +131,8 @@ func main() {
 	crInformerFactory := buildCustomResourceInformerFactory(crClient)
 	podInformerFactory := buildPodInformerFactory(kubeClient)
 	applicationController := sparkapplication.NewController(
-		crClient, kubeClient, crInformerFactory, podInformerFactory, metricConfig, *namespace, *ingressUrlFormat)
+		crClient, kubeClient, crInformerFactory, podInformerFactory,
+		metricConfig, *namespace, *ingressUrlFormat, apiExtensionsClient, volcanoClient)
 	scheduledApplicationController := scheduledsparkapplication.NewController(
 		crClient, kubeClient, apiExtensionsClient, crInformerFactory, clock.RealClock{})
 
