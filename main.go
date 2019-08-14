@@ -36,13 +36,14 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	volcanoclient "volcano.sh/volcano/pkg/client/clientset/versioned"
 
 	crclientset "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/client/clientset/versioned"
 	crinformers "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/client/informers/externalversions"
 	operatorConfig "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/config"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/scheduledsparkapplication"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/sparkapplication"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/sparkapplication/batchscheduler"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/sparkapplication/batchscheduler/interface"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/crd"
 	ssacrd "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/crd/scheduledsparkapplication"
 	sacrd "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/crd/sparkapplication"
@@ -51,24 +52,24 @@ import (
 )
 
 var (
-	master                  = flag.String("master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
-	kubeConfig              = flag.String("kubeConfig", "", "Path to a kube config. Only required if out-of-cluster.")
-	installCRDs             = flag.Bool("install-crds", true, "Whether to install CRDs")
-	controllerThreads       = flag.Int("controller-threads", 10, "Number of worker threads used by the SparkApplication controller.")
-	resyncInterval          = flag.Int("resync-interval", 30, "Informer resync interval in seconds.")
-	namespace               = flag.String("namespace", apiv1.NamespaceAll, "The Kubernetes namespace to manage. Will manage custom resource objects of the managed CRD types for the whole cluster if unset.")
-	enableWebhook           = flag.Bool("enable-webhook", false, "Whether to enable the mutating admission webhook for admitting and patching Spark pods.")
-	webhookConfigName       = flag.String("webhook-config-name", "spark-webhook-config", "The name of the MutatingWebhookConfiguration object to create.")
-	webhookCertDir          = flag.String("webhook-cert-dir", "/etc/webhook-certs", "The directory where x509 certificate and key files are stored.")
-	webhookSvcNamespace     = flag.String("webhook-svc-namespace", "spark-operator", "The namespace of the Service for the webhook server.")
-	webhookSvcName          = flag.String("webhook-svc-name", "spark-webhook", "The name of the Service for the webhook server.")
-	webhookPort             = flag.Int("webhook-port", 8080, "Service port of the webhook server.")
-	enableMetrics           = flag.Bool("enable-metrics", false, "Whether to enable the metrics endpoint.")
-	metricsPort             = flag.String("metrics-port", "10254", "Port for the metrics endpoint.")
-	metricsEndpoint         = flag.String("metrics-endpoint", "/metrics", "Metrics endpoint.")
-	metricsPrefix           = flag.String("metrics-prefix", "", "Prefix for the metrics.")
-	ingressUrlFormat        = flag.String("ingress-url-format", "", "Ingress URL format.")
-	enableVolcanoScheduling = flag.Bool("enable-volcano-scheduling", false, "Whether enable scheduling executor pods via volcano.")
+	master              = flag.String("master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
+	kubeConfig          = flag.String("kubeConfig", "", "Path to a kube config. Only required if out-of-cluster.")
+	installCRDs         = flag.Bool("install-crds", true, "Whether to install CRDs")
+	controllerThreads   = flag.Int("controller-threads", 10, "Number of worker threads used by the SparkApplication controller.")
+	resyncInterval      = flag.Int("resync-interval", 30, "Informer resync interval in seconds.")
+	namespace           = flag.String("namespace", apiv1.NamespaceAll, "The Kubernetes namespace to manage. Will manage custom resource objects of the managed CRD types for the whole cluster if unset.")
+	enableWebhook       = flag.Bool("enable-webhook", false, "Whether to enable the mutating admission webhook for admitting and patching Spark pods.")
+	webhookConfigName   = flag.String("webhook-config-name", "spark-webhook-config", "The name of the MutatingWebhookConfiguration object to create.")
+	webhookCertDir      = flag.String("webhook-cert-dir", "/etc/webhook-certs", "The directory where x509 certificate and key files are stored.")
+	webhookSvcNamespace = flag.String("webhook-svc-namespace", "spark-operator", "The namespace of the Service for the webhook server.")
+	webhookSvcName      = flag.String("webhook-svc-name", "spark-webhook", "The name of the Service for the webhook server.")
+	webhookPort         = flag.Int("webhook-port", 8080, "Service port of the webhook server.")
+	enableMetrics       = flag.Bool("enable-metrics", false, "Whether to enable the metrics endpoint.")
+	metricsPort         = flag.String("metrics-port", "10254", "Port for the metrics endpoint.")
+	metricsEndpoint     = flag.String("metrics-endpoint", "/metrics", "Metrics endpoint.")
+	metricsPrefix       = flag.String("metrics-prefix", "", "Prefix for the metrics.")
+	ingressUrlFormat    = flag.String("ingress-url-format", "", "Ingress URL format.")
+	batchSchedulerName  = flag.String("batchSchedulerName", "", "Use specified scheduler for pods' batch scheduling.")
 )
 
 func main() {
@@ -112,12 +113,11 @@ func main() {
 		glog.Fatal(err)
 	}
 
-	var volcanoClient volcanoclient.Interface
-	if *enableVolcanoScheduling {
-		var err error
-		volcanoClient, err = volcanoclient.NewForConfig(config)
-		if err != nil {
-			glog.Fatal(err)
+	var batchScheduler schedulerinterface.BatchScheduler
+	if *batchSchedulerName != "" {
+		batchScheduler = batchscheduler.InitializeBatchScheduler(*batchSchedulerName, config)
+		if batchScheduler == nil {
+			glog.Fatal("Batch scheduler %s failed to initialize.", batchSchedulerName)
 		}
 	}
 
@@ -137,7 +137,7 @@ func main() {
 	podInformerFactory := buildPodInformerFactory(kubeClient)
 	applicationController := sparkapplication.NewController(
 		crClient, kubeClient, crInformerFactory, podInformerFactory,
-		metricConfig, *namespace, *ingressUrlFormat, apiExtensionsClient, volcanoClient)
+		metricConfig, *namespace, *ingressUrlFormat, batchScheduler)
 	scheduledApplicationController := scheduledsparkapplication.NewController(
 		crClient, kubeClient, apiExtensionsClient, crInformerFactory, clock.RealClock{})
 
