@@ -37,13 +37,13 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/batchscheduler"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/batchscheduler/interface"
 	crclientset "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/client/clientset/versioned"
 	crinformers "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/client/informers/externalversions"
 	operatorConfig "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/config"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/scheduledsparkapplication"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/sparkapplication"
-	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/sparkapplication/batchscheduler"
-	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/controller/sparkapplication/batchscheduler/interface"
 	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/crd"
 	ssacrd "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/crd/scheduledsparkapplication"
 	sacrd "github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/crd/sparkapplication"
@@ -115,9 +115,9 @@ func main() {
 
 	var batchScheduler schedulerinterface.BatchScheduler
 	if *batchSchedulerName != "" {
-		batchScheduler = batchscheduler.InitializeBatchScheduler(*batchSchedulerName, config)
+		batchScheduler = batchscheduler.GetBatchScheduler(*batchSchedulerName, config)
 		if batchScheduler == nil {
-			glog.Fatal("Batch scheduler %s failed to initialize.", batchSchedulerName)
+			glog.Fatalf("no batch scheduler named %s registered.", *batchSchedulerName)
 		}
 	}
 
