@@ -341,15 +341,6 @@ func (c *Controller) getAndUpdateDriverState(app *v1beta1.SparkApplication) erro
 		}
 	}
 
-	if c.scheduleViaBatchScheduler(app) && driverPod.Status.Phase == apiv1.PodRunning {
-		newApp, err := c.batchScheduler.OnSparkDriverPodScheduled(app)
-		if err != nil {
-			glog.Errorf("Failed to handle batch scheduler's OnSparkDriverPodScheduled with error %v", err)
-		} else {
-			app = newApp
-		}
-	}
-
 	newState := driverPodPhaseToApplicationState(driverPod.Status.Phase)
 	// Only record a driver event if the application state (derived from the driver pod phase) has changed.
 	if newState != app.Status.AppState.State {
@@ -654,7 +645,7 @@ func (c *Controller) submitSparkApplication(app *v1beta1.SparkApplication) *v1be
 	}
 
 	// Use batch scheduler to perform app submit tasks
-	if c.scheduleViaBatchScheduler(app) {
+	if c.shouldDoBatchScheduling(app) {
 		newApp, err := c.batchScheduler.OnSparkApplicationSubmitted(app)
 		if err != nil {
 			glog.Errorf("Failed to process batch scheduler OnSparkApplicationSubmitted with error %v", err)
@@ -699,7 +690,7 @@ func (c *Controller) submitSparkApplication(app *v1beta1.SparkApplication) *v1be
 	return app
 }
 
-func (c *Controller) scheduleViaBatchScheduler(app *v1beta1.SparkApplication) bool {
+func (c *Controller) shouldDoBatchScheduling(app *v1beta1.SparkApplication) bool {
 	return c.batchScheduler != nil && c.batchScheduler.ShouldSchedule(app)
 }
 

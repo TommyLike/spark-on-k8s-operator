@@ -19,6 +19,8 @@ package volcano
 import (
 	"fmt"
 	"github.com/golang/glog"
+	v12 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -33,7 +35,7 @@ import (
 )
 
 const (
-	PodGroupName = "podgroups.scheduling.incubator.k8s.io"
+	PodGroupName = "podgroups.scheduling.sigs.dev"
 )
 
 type VolcanoBatchScheduler struct {
@@ -88,7 +90,8 @@ func (v *VolcanoBatchScheduler) syncPodGroupInClientMode(app *v1beta1.SparkAppli
 	//We only care about the executor pods in client mode
 	newApp := app.DeepCopy()
 	if _, ok := newApp.Spec.Executor.Annotations[v1alpha2.GroupNameAnnotationKey]; !ok {
-		if err := v.syncPodGroup(newApp, *newApp.Spec.Executor.Instances); err == nil {
+		//Only executor resource will be considered.
+		if err := v.syncPodGroup(newApp, *newApp.Spec.Executor.Instances, getExecutorRequestResource(app)); err == nil {
 			newApp.Spec.Executor.Annotations[v1alpha2.GroupNameAnnotationKey] = v.getAppPodGroupName(newApp)
 		} else {
 			return nil, err
@@ -99,10 +102,11 @@ func (v *VolcanoBatchScheduler) syncPodGroupInClientMode(app *v1beta1.SparkAppli
 
 func (v *VolcanoBatchScheduler) syncPodGroupInClusterMode(app *v1beta1.SparkApplication) (*v1beta1.SparkApplication, error) {
 	//We need both mark Driver and Executor when submitting
-	//NOTE: In cluster mode, the initial size of PodGroup is set to 1 in order to **only** schedule driver pod,
-	//and once the driver pod get scheduled, we will update the PodGroup size to reflect the actual size.
+	//NOTE: In cluster mode, the initial size of PodGroup is set to 1 in order to schedule driver pod first.
 	if _, ok := app.Spec.Driver.Annotations[v1alpha2.GroupNameAnnotationKey]; !ok {
-		if err := v.syncPodGroup(app, 1); err == nil {
+		//Both driver and executor resource will be considered.
+		totalResource := sumResourceList([]v12.ResourceList{getExecutorRequestResource(app), getDriverRequestResource(app)})
+		if err := v.syncPodGroup(app, 1, totalResource); err == nil {
 			app.Spec.Executor.Annotations[v1alpha2.GroupNameAnnotationKey] = v.getAppPodGroupName(app)
 			app.Spec.Driver.Annotations[v1alpha2.GroupNameAnnotationKey] = v.getAppPodGroupName(app)
 		} else {
@@ -112,19 +116,11 @@ func (v *VolcanoBatchScheduler) syncPodGroupInClusterMode(app *v1beta1.SparkAppl
 	return app, nil
 }
 
-func (v *VolcanoBatchScheduler) OnSparkDriverPodScheduled(app *v1beta1.SparkApplication) (*v1beta1.SparkApplication, error) {
-	// Update PodGroup MinMember if required
-	if app.Spec.Mode == v1beta1.ClusterMode {
-		return app, v.syncPodGroup(app, 1+*(app.Spec.Executor.Instances))
-	}
-	return app, nil
-}
-
 func (v *VolcanoBatchScheduler) getAppPodGroupName(app *v1beta1.SparkApplication) string {
 	return fmt.Sprintf("spark-%s-pg", app.Name)
 }
 
-func (v *VolcanoBatchScheduler) syncPodGroup(app *v1beta1.SparkApplication, size int32) error {
+func (v *VolcanoBatchScheduler) syncPodGroup(app *v1beta1.SparkApplication, size int32, minResource v12.ResourceList) error {
 	var err error
 	podGroupName := v.getAppPodGroupName(app)
 	if pg, err := v.volcanoClient.SchedulingV1alpha2().PodGroups(app.Namespace).Get(podGroupName, v1.GetOptions{}); err != nil {
@@ -140,7 +136,8 @@ func (v *VolcanoBatchScheduler) syncPodGroup(app *v1beta1.SparkApplication, size
 				},
 			},
 			Spec: v1alpha2.PodGroupSpec{
-				MinMember: size,
+				MinMember:    size,
+				MinResources: &minResource,
 			},
 		}
 
@@ -181,4 +178,109 @@ func New(config *rest.Config) schedulerinterface.BatchScheduler {
 		extensionClient: extClient,
 		volcanoClient:   vkClient,
 	}
+}
+
+func getExecutorRequestResource(app *v1beta1.SparkApplication) v12.ResourceList {
+	minResource := v12.ResourceList{}
+
+	//CoreRequest correspond to executor's core request
+	if app.Spec.Executor.CoreRequest != nil {
+		if value, err := resource.ParseQuantity(*app.Spec.Executor.CoreRequest); err == nil {
+			minResource[v12.ResourceCPU] = value
+		}
+	}
+
+	//Use Core attribute if CoreRequest is empty
+	if app.Spec.Executor.Cores != nil {
+		if value, err := resource.ParseQuantity(fmt.Sprintf("%f", *app.Spec.Executor.Cores)); err == nil {
+			minResource[v12.ResourceCPU] = value
+		}
+	}
+	//CoreLimit correspond to executor's core limit, this attribute will be used only when core request is empty.
+	if app.Spec.Executor.CoreLimit != nil {
+		if _, ok := minResource[v12.ResourceCPU]; !ok {
+			if value, err := resource.ParseQuantity(*app.Spec.Executor.CoreLimit); err == nil {
+				minResource[v12.ResourceCPU] = value
+			}
+		}
+	}
+
+	//Memory + MemoryOverhead correspond to executor's memory request
+	if app.Spec.Executor.Memory != nil {
+		if value, err := resource.ParseQuantity(*app.Spec.Executor.Memory); err == nil {
+			minResource[v12.ResourceMemory] = value
+		}
+	}
+	if app.Spec.Executor.MemoryOverhead != nil {
+		if value, err := resource.ParseQuantity(*app.Spec.Executor.MemoryOverhead); err == nil {
+			if existing, ok := minResource[v12.ResourceMemory]; ok {
+				existing.Add(value)
+				minResource[v12.ResourceMemory] = existing
+			} else {
+				minResource[v12.ResourceMemory] = value
+			}
+		}
+	}
+
+	resourceList := []v12.ResourceList{{}}
+	for i := int32(0); i < *app.Spec.Executor.Instances; i++ {
+		resourceList = append(resourceList, minResource)
+	}
+	return sumResourceList(resourceList)
+}
+
+func getDriverRequestResource(app *v1beta1.SparkApplication) v12.ResourceList {
+	minResource := v12.ResourceList{}
+
+	//Cores correspond to driver's core request
+	if app.Spec.Driver.Cores != nil {
+		if value, err := resource.ParseQuantity(fmt.Sprintf("%f", *app.Spec.Driver.Cores)); err == nil {
+			minResource[v12.ResourceCPU] = value
+		}
+	}
+
+	//CoreLimit correspond to driver's core limit, this attribute will be used only when core request is empty.
+	if app.Spec.Driver.CoreLimit != nil {
+		if _, ok := minResource[v12.ResourceCPU]; !ok {
+			if value, err := resource.ParseQuantity(*app.Spec.Driver.CoreLimit); err == nil {
+				minResource[v12.ResourceCPU] = value
+			}
+		}
+	}
+
+	//Memory + MemoryOverhead correspond to driver's memory request
+	if app.Spec.Driver.Memory != nil {
+		if value, err := resource.ParseQuantity(*app.Spec.Driver.Memory); err == nil {
+			minResource[v12.ResourceMemory] = value
+		}
+	}
+	if app.Spec.Driver.MemoryOverhead != nil {
+		if value, err := resource.ParseQuantity(*app.Spec.Driver.MemoryOverhead); err == nil {
+			if existing, ok := minResource[v12.ResourceMemory]; ok {
+				existing.Add(value)
+				minResource[v12.ResourceMemory] = existing
+			} else {
+				minResource[v12.ResourceMemory] = value
+			}
+		}
+	}
+
+	return minResource
+}
+
+func sumResourceList(list []v12.ResourceList) v12.ResourceList {
+
+	totalResource := v12.ResourceList{}
+	for _, l := range list {
+		for name, quantity := range l {
+
+			if value, ok := totalResource[name]; !ok {
+				totalResource[name] = *quantity.Copy()
+			} else {
+				value.Add(quantity)
+				totalResource[name] = value
+			}
+		}
+	}
+	return totalResource
 }
