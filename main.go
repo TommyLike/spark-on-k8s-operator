@@ -110,7 +110,7 @@ func main() {
 
 	var batchScheduler schedulerinterface.BatchScheduler
 	if *batchSchedulerName != "" {
-		batchScheduler = batchscheduler.GetBatchScheduler(*batchSchedulerName, config)
+		batchScheduler = batchscheduler.GetBatchScheduler(*batchSchedulerName, config, *enableWebhook)
 		if batchScheduler == nil {
 			glog.Fatalf("no batch scheduler named %s registered.", *batchSchedulerName)
 		}
@@ -149,7 +149,7 @@ func main() {
 
 	var hook *webhook.WebHook
 	if *enableWebhook {
-		hook, err = webhook.New(kubeClient, crInformerFactory, *namespace)
+		hook, err = webhook.New(kubeClient, crInformerFactory, *namespace, batchScheduler)
 		if err != nil {
 			glog.Fatal(err)
 		}

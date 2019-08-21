@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/GoogleCloudPlatform/spark-on-k8s-operator/pkg/batchscheduler/interface"
 	"io/ioutil"
 	"net/http"
 	"strings"
@@ -64,6 +65,7 @@ type WebHook struct {
 	failurePolicy     v1beta1.FailurePolicyType
 	selector          *metav1.LabelSelector
 	sparkJobNamespace string
+	scheduler         schedulerinterface.BatchScheduler
 }
 
 // Configuration parsed from command-line flags
@@ -100,6 +102,7 @@ func New(
 	clientset kubernetes.Interface,
 	informerFactory crinformers.SharedInformerFactory,
 	jobNamespace string,
+	scheduler schedulerinterface.BatchScheduler,
 ) (*WebHook, error) {
 	cert, err := NewCertProvider(
 		userConfig.serverCert,
@@ -124,6 +127,7 @@ func New(
 		serviceRef:        serviceRef,
 		sparkJobNamespace: jobNamespace,
 		failurePolicy:     arv1beta1.Ignore,
+		scheduler:         scheduler,
 	}
 	if userConfig.webhookFailOnError {
 		if userConfig.webhookNamespaceSelector == "" {
@@ -233,7 +237,7 @@ func (wh *WebHook) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reviewResponse, err := mutatePods(review, wh.lister, wh.sparkJobNamespace)
+	reviewResponse, err := mutatePods(review, wh.lister, wh.sparkJobNamespace, wh.scheduler)
 	if err != nil {
 		internalError(w, err)
 		return
@@ -350,7 +354,8 @@ func (wh *WebHook) selfDeregistration(webhookConfigName string) error {
 func mutatePods(
 	review *admissionv1beta1.AdmissionReview,
 	lister crdlisters.SparkApplicationLister,
-	sparkJobNs string) (*admissionv1beta1.AdmissionResponse, error) {
+	sparkJobNs string,
+	scheduler schedulerinterface.BatchScheduler) (*admissionv1beta1.AdmissionResponse, error) {
 	raw := review.Request.Object.Raw
 	pod := &corev1.Pod{}
 	if err := json.Unmarshal(raw, pod); err != nil {
@@ -375,6 +380,11 @@ func mutatePods(
 	}
 
 	patchOps := patchSparkPod(pod, app)
+	//Append scheduler's patch operations.
+	if scheduler != nil {
+		patchOps = append(patchOps, scheduler.PatchApplicationPod(pod, app)...)
+	}
+
 	if len(patchOps) > 0 {
 		glog.V(2).Infof("Pod %s in namespace %s is subject to mutation", pod.GetObjectMeta().GetName(), review.Request.Namespace)
 		patchBytes, err := json.Marshal(patchOps)
